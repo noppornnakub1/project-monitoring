@@ -1,0 +1,74 @@
+name: project-monitoring
+
+# Shared log settings: Docker's json-file driver rotates container logs itself
+# (max 10 MB x 3 files per container) so stdout logs can never fill the disk.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:16                 # debian-based: ships bash, so scripts/ can also run inside it
+    container_name: pm-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-project_monitoring}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      TZ: ${TZ:-Asia/Bangkok}
+    volumes:
+      - pgdata:/var/lib/postgresql/data              # persistent data (named volume)
+      - ./db/init:/docker-entrypoint-initdb.d:ro     # schema + seed, run once on empty volume
+      - ./backups:/backups                           # backup target used by scripts/backup.sh
+      - ./scripts:/scripts:ro                        # lets you run the scripts from inside the container
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    logging: *default-logging
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: project-monitoring-api:latest
+    container_name: pm-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy     # wait until schema is initialised and postgres accepts connections
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
+      # "db" resolves through the compose network's internal DNS
+      ConnectionStrings__Default: "Host=db;Port=5432;Database=${POSTGRES_DB:-project_monitoring};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}"
+      TZ: ${TZ:-Asia/Bangkok}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+    logging: *default-logging
+
+volumes:
+  pgdata:
+
+networks:
+  backend:
+    driver: bridge
